@@ -1,0 +1,15 @@
+
+# General
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build generated
+build/
+dist/
+
+# Various Editors
+.vscode/
+.idea/
+*.swp
+*~
