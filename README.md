@@ -1,192 +1,208 @@
 # Codex CLI Generic Agent Installer
 
-Codex CLI Generic Agent Installer (`codex_profile_installer.sh`) adds reusable Codex CLI agent profiles to your shell so you can trigger the right behavior with a single command.
+A reusable Bash script to install and manage custom Codex CLI agent profiles in your shell with a single command.
 
 ## Table of Contents
-- [🚀 Executive Summary](#-executive-summary)
-- [⚡ Quick Start Guide](#-quick-start-guide)
-- [🧠 Core Concepts](#-core-concepts)
-- [🛠️ Detailed Implementation](#-detailed-implementation)
-- [🧩 Advanced Usage](#-advanced-usage)
-- [📚 Reference Materials](#-reference-materials)
-- [🆘 Troubleshooting & FAQ](#-troubleshooting--faq)
+- [🚀 **What is This?**](#-what-is-this)
+- [⚡ **Quick Start Guide**](#-quick-start-guide)
+- [🧠 **Core Concepts**](#-core-concepts)
+- [⚙️ **How It Works**](#️-how-it-works)
+- [🧰 **Commands & Reference**](#-commands--reference)
+- [🆘 **Troubleshooting & FAQ**](#-troubleshooting--faq)
 
-## 🚀 Executive Summary
-- 🎯 **What**: A Bash 4+ installer that injects Codex CLI agent aliases into your shell RC file (bash/zsh) and keeps them grouped for easy management.
-- 🌍 **Why**: Share one general-purpose installer so every developer can bring their own markdown (or other) profile without editing the script.
-- ✨ **Highlights**: Interactive or scripted installs, automatic shell RC backups, optional global wrapper grouping, tiered aliases per trigger, uninstall & migration utilities.
-- 🏷️ **Version**: v0.0.1 (alpha) — see `GLOBAL_BEGIN/END` markers for future upgrades.
+## 🚀 What is This?
+- **What**: A Bash 4+ script that injects Codex CLI agent aliases into your `.zshrc` or `.bashrc` file.
+- **Why**: To create reusable, shareable, and easily managed shell commands that trigger specific Codex agent behaviors defined in markdown files.
+- **Highlights**:
+  - **Interactive & Automated**: Run with prompts or fully scripted with environment variables.
+  - **Safe**: Automatically backs up your shell RC file before making changes.
+  - **Organized**: Groups all generated code inside a versioned, collapsible block for clean management.
+  - **Flexible**: Supports tiered aliases (e.g., `my-agent-low`, `my-agent-high`) and easy uninstalls.
 
 ## ⚡ Quick Start Guide
 
-### 0. Grab the Installer
-```bash
-git clone https://github.com/bizzkoot/codex-profile-installer.git
-cd codex-profile-installer
-```
-
 ### 1. Prerequisites
-- 🧰 Bash `>= 4.0` (macOS users may need Homebrew Bash at `/opt/homebrew/bin/bash`).
-- 🤖 Codex CLI installed and available on your `PATH`.
-- 📄 The profile markdown you want to install (sample: `Profile/markdown.md`).
+- **Bash 4+**: Check with `bash --version`. *(macOS users may need `brew install bash`)*.
+- **Codex CLI**: Check with `command -v codex`.
+- **An Agent Profile**: Use the sample `Profile/markdown.md` from this repo to start.
 
-### 2. Install the Sample Markdown Agent
+### 2. Get the Installer
 ```bash
-# Run from the repository root
-bash codex_profile_installer.sh
+# Clone the repository
+git clone [https://github.com/bizzkoot/codex-profile-installer.git](https://github.com/bizzkoot/codex-profile-installer.git)
+cd codex-profile-installer
+
+# Make the installer executable
+chmod +x codex_profile_installer.sh
 ```
-During the interactive prompts, provide:
-- 🔔 **Trigger**: `markdown`
-- 🧭 **Type**: `Planning` or `Execution` depending on your workflow
-- 🧪 **Model**: choose between `gpt-5` or `gpt-5-codex`
-- 📈 **Tiers**: pick one or more reasoning tiers (e.g., `mid`, `high`)
-- 🗂️ **Profile Source**: paste the markdown when prompted (open `Profile/markdown.md` in an editor and copy/paste it)
-- 🧷 **Global Wrapper**: choose `Y` to nest agents between the script’s begin/end markers.
 
-### 3. Verify the Installation
-- 🔄 Reload your shell (`source ~/.zshrc` or `source ~/.bashrc`).
-- 📋 Run `codex-generic-status` to list active aliases added by the installer.
-- 🚨 Trigger your agent, e.g. `markdown "Draft onboarding README"`.
+### 3. Install an Agent
+Choose one of the following methods.
 
-### 4. Customize for Your Own Profile
+#### Option A: Automated Install (Recommended)
+This non-interactive mode is best for consistency. The example installs the sample `markdown.md` profile as a new `mdexpert` command.
 ```bash
-PROFILE_FILE="/path/to/your_profile.md" \
-TRIGGER="writer" TYPE="Planning" \
-MODEL="gpt-5" TIERS="mid,high" \
+PROFILE_FILE="Profile/markdown.md" \
+TRIGGER="mdexpert" \
+TYPE="Planning" \
 GROUP_GLOBAL="Y" \
-bash codex_profile_installer.sh --auto --mode overwrite
+./codex_profile_installer.sh --auto --mode overwrite
 ```
-Replace the environment variables with your preferred trigger, model, tiers, and markdown file. This non-interactive path is how you point the installer at a profile file directly.
+
+#### Option B: Interactive Install
+Run the script without flags to get interactive prompts that guide you through the setup.
+```bash
+./codex_profile_installer.sh
+# Follow the on-screen prompts to configure your agent.
+```
+
+### 4. Activate and Verify
+1.  **Reload your shell** to activate the new command:
+    ```bash
+    # For Zsh
+    source ~/.zshrc
+
+    # For Bash
+    source ~/.bashrc
+    ```
+2.  **Check the status** to see your agent:
+    ```bash
+    codex-generic-status
+    # Expected output:
+    # 📂 Installed Codex agents (generic):
+    #  • mdexpert (active in this shell)
+    ```
+3.  **Use it!**
+    ```bash
+    # This command now launches Codex CLI with your profile and task pre-loaded.
+    mdexpert "Draft a README for a new project about task management."
+    ```
 
 ## 🧠 Core Concepts
-- 🪄 **Trigger**: The shell function name you will run (e.g., `markdown`, `writer-high`).
-- 🧭 **Type**: `Planning` agents default to read-only sandbox and low verbosity; `Execution` agents allow workspace writes and medium verbosity.
-- 🧠 **Model**: `gpt-5` or `gpt-5-codex`. Tiers adjust the `model_reasoning_effort` the CLI requests.
-- 🎚️ **Tiers**: One trigger creates tier-specific helpers (e.g., `markdown-mid`, `markdown-high`) plus a default alias pointing to the first non-mid tier if desired.
-- 📝 **Profile Text**: Markdown fed to Codex CLI before the task delimiter. Use any content or start from `Profile/markdown.md`.
-- ✂️ **User Task Delimiter**: `========================= USER TASK =========================` separates profile text from each prompt.
-- 🪟 **File Opener**: Controls which editor Codex CLI opens files in (`vscode`, `windsurf`, `cursor`, or `none`).
-- 🧳 **Global Wrapper**: Optional comment banner (`# BEGIN/END GENERIC CODEX AGENTS v0.0.1`) used to group installer-managed content for fast removal.
 
-## 🛠️ Detailed Implementation
+- **Trigger**: The main command you'll use in your shell (e.g., `mdexpert`).
+- **Profile**: A markdown file containing the system prompt, instructions, and behavior for your agent.
+- **Tiers**: Create variants of your trigger with different reasoning efforts (e.g., `mdexpert-low`, `mdexpert-mid`). The base trigger defaults to the `mid` tier.
+- **Global Wrapper**: An optional `# BEGIN`/`# END` block in your RC file that neatly contains all agents installed by this script, making them easy to find or remove.
+
+### Planning vs. Execution Type
+Choosing a `TYPE` sets important defaults for your agent's behavior. This is the key difference:
+
+| Feature | `Planning` (Default) | `Execution` |
+| :--- | :--- | :--- |
+| **Sandbox** | `read-only` | `workspace-write` |
+| **Goal** | Safely analyze, review, and plan tasks. | Modify files and execute commands. |
+| **Approval** | Asks before running **untrusted** code. | Asks only **on request**. |
+| **Web Search** | **Enabled** by default. | **Disabled** by default. |
+| **Verbosity** | `low` | `medium` |
+
+**Choose `Planning`** for agents that write documentation, analyze code, or answer questions.
+**Choose `Execution`** for agents that refactor code, run tests, or manage files.
+
+## ⚙️ How It Works
+The script intelligently modifies your shell's startup file (`.zshrc` or `.bashrc`).
 
 ### Installation Flow
+Whether you run in interactive or automated mode, the script follows the same core logic after gathering its instructions.
+
 ```mermaid
 flowchart TD
-    A[Start Installer] --> B{Interactive?}
-    B -->|Yes| C[Prompt for trigger, type, tiers, profile]
-    B -->|No / --auto| D[Read environment variables]
-    C --> E[Validate inputs]
-    D --> E
-    E --> F[Backup detected shell RC]
-    F --> G{Global wrapper present?}
-    G -->|No| H[Append wrapper markers]
-    G -->|Yes| I[Reuse existing wrapper]
-    H --> J[Emit agent block]
-    I --> J
-    J --> K[Insert functions + metadata]
-    K --> L[Reload shell for new alias]
+    subgraph "1. Input Gathering"
+        direction LR
+        A[Interactive Prompts]
+        B[--auto flag + ENV VARS]
+    end
+
+    subgraph "2. Installation Process"
+        C[Validate Inputs]
+        D[Backup Shell RC File]
+        E{Global Wrapper Exists?}
+        F[Create Global Wrapper]
+        G[Generate Agent Shell Code]
+        H[Inject Code into Wrapper]
+        I[Done!]
+    end
+
+    A --> C
+    B --> C
+    C --> D --> E
+    E -- No --> F --> G
+    E -- Yes --> G
+    G --> H --> I
 ```
 
-### What Gets Written
-- 📦 A `# BEGIN/END GENERIC CODEX AGENT (<trigger>)` block containing:
-  - 🔁 A default alias (`trigger() { trigger-tier "$@"; }`).
-  - 🧩 Tier-specific shell functions calling `codex` with sandbox, approval, and verbosity defaults.
-  - 🧾 The profile content embedded inside a HEREDOC (`__CODEX_PROFILE__`).
-  - 📊 Helper status functions (`codex-generic-status`) if not already defined.
-- 🗂️ Optional global wrapper comments around all installer-managed blocks.
-- 🧾 A one-line export (`CODEX_GENERIC_AGENTS`) tracking installed triggers in the current shell.
+### What Gets Written to Your RC File
+The script adds a clean, self-contained block. With `GROUP_GLOBAL=Y`, it looks like this:
 
-### Safety Nets
-- 🛡️ RC files are backed up to `<rc>.bak.<timestamp>` before modification.
-- 🧹 `safe_range_delete` removes existing blocks cleanly if you overwrite or delete a trigger.
-- ✅ The installer refuses invalid trigger names (must match shell function rules).
+```bash
+# ... your other shell configuration ...
 
-## 🧩 Advanced Usage
+# BEGIN GENERIC CODEX AGENTS v0.0.1
+# (Agents installed by codex_profile_installer v0.0.1 will appear below)
 
-### Non-Interactive Automation (`--auto`)
-Set environment variables, then run the script with `--auto` to skip prompts.
+# BEGIN GENERIC CODEX AGENT (mdexpert) v0.0.1
+# Generated: ...
+# Trigger: mdexpert
+# Type: Planning
+# ...
+#
+# default alias -> chosen default tier
+mdexpert() { mdexpert-mid "$@"; }
+
+# ... tier-specific functions calling 'codex' ...
+# END GENERIC CODEX AGENT (mdexpert)
+
+# END GENERIC CODEX AGENTS v0.0.1
+```
+
+## 🧰 Commands & Reference
+
+### Non-Interactive Installation (`--auto`)
+For automated setups, use the `--auto` flag and set these environment variables:
 
 | Variable | Required | Description |
-|----------|----------|-------------|
-| `TRIGGER` | Yes | Function name to create (e.g., `doc`). |
-| `TYPE` | Yes | `Planning` or `Execution`. |
-| `MODEL` | No | Defaults to `gpt-5`. |
-| `TIERS` | No | CSV of tiers (`min,low,mid,high` for gpt-5; `low,mid,high` for gpt-5-codex). |
-| `FILE_OPENER` | No | Editor to launch (`vscode`, `windsurf`, `cursor`, `none`). |
-| `WS_EXEC` | No | `1` enables web search for Execution agents. |
-| `ENDMARK` | No | Custom end marker when pasting inline profile text. |
-| `PROFILE_FILE` | Yes | Path to the markdown profile. |
-| `GROUP_GLOBAL` | No | `Y` groups blocks inside the global wrapper. |
+| :--- | :--- | :--- |
+| `TRIGGER` | **Yes** | The command name to create (e.g., `doc_writer`). |
+| `TYPE` | **Yes** | `Planning` or `Execution`. |
+| `PROFILE_FILE` | **Yes** | Path to the markdown profile file. |
+| `MODEL` | No | `gpt-5` (default) or `gpt-5-codex`. |
+| `TIERS` | No | CSV of tiers (`min,low,mid,high`). Defaults to `mid`. |
+| `GROUP_GLOBAL`| No | `Y` to use the global wrapper. Defaults to `N`. |
+| `FILE_OPENER` | No | `vscode` (default), `cursor`, `none`, etc. |
 
-`--mode` controls how existing triggers are handled: `overwrite` (default), `skip`, or `delete` before reinstalling.
+### Managing Agents
+- **List Agents**: `codex-generic-status`
+- **Uninstall One**: `./codex_profile_installer.sh --uninstall --trigger mdexpert`
+- **Uninstall All**: `./codex_profile_installer.sh --uninstall --all`
+- **Migrate to Wrapper**: `./codex_profile_installer.sh --migrate-global`
 
-### Managing Installed Agents
-- 📋 **List**: `codex-generic-status` prints generic agents present in the current shell session.
-- 🔁 **Source Selection**: the installer can prompt to `source` your RC after install, or rerun `source ~/.zshrc` manually.
-- 🗃️ **Global Grouping**: pass `GROUP_GLOBAL=Y` (or answer `Y` interactively) to keep all managed agents inside the versioned wrapper for easy diffing.
+### Full CLI Flag Reference
 
-### Uninstalling
-```bash
-bash codex_profile_installer.sh --uninstall --trigger markdown
-bash codex_profile_installer.sh --uninstall --all
-```
-Both commands back up your RC before removing blocks. Without flags, the script offers an interactive menu.
-
-### Migrating into the Global Wrapper
-```bash
-bash codex_profile_installer.sh --migrate-global --dry-run
-bash codex_profile_installer.sh --migrate-global --include-any-version --triggers markdown,writer
-```
-- Moves loose per-trigger blocks between the `GLOBAL_BEGIN/END` markers.
-- `--dry-run` previews actions; `--include-any-version` migrates blocks from older installer versions.
-
-### Customizing File Openers & Web Search
-- 🪟 Set `FILE_OPENER` per install or export `CODEX_FILE_OPENER` before launching a trigger.
-- 🌐 Planning agents enable web search by default; set `WS_EXEC=1` if you want Execution agents to opt in.
-
-### Working with Multiple Tiers
-- 🪜 Each tier results in an alias like `markdown-low`, `markdown-mid`, `markdown-high`.
-- 🎯 The base trigger (`markdown`) points to `mid` by default or to the first selected tier when `mid` is absent.
-- 🎛️ Adjust reasoning effort by choosing different tier aliases at runtime.
-
-## 📚 Reference Materials
-
-### Repository Layout
-```
-.
-├── README.md
-├── codex_profile_installer.sh
-└── Profile
-    └── markdown.md
-```
-
-### CLI Flags Overview
 | Flag | Purpose |
-|------|---------|
+| :--- | :--- |
 | `--auto` | Use environment variables instead of prompts. |
-| `--mode <overwrite|skip|delete>` | Decide how to handle existing triggers. |
-| `--uninstall` | Enter uninstall mode (combine with `--all` or `--trigger`). |
-| `--all` | Remove every agent created by this installer. |
-| `--trigger <name>` | Target a single trigger for uninstall. |
-| `--migrate-global` | Wrap loose blocks inside the global markers. |
-| `--dry-run` | Preview migration changes without editing files. |
-| `--include-any-version` | Migrate blocks regardless of version stamp. |
-| `--triggers csv` | Filter which triggers migrate. |
-| `--help` | Print usage summary. |
-
-### Helper Functions Added to Your Shell
-- 🧾 `codex-generic-status`: Lists installer-managed aliases and whether they are loaded.
-- 🔄 `codex-status`: Delegates to `codex-generic-status` when no other function exists.
-- 🧰 `${trigger}` / `${trigger}-${tier}`: Call Codex CLI with embedded profile text and sanitized defaults.
+| `--mode ` | Action to take if a trigger already exists. |
+| `--uninstall` | Enter uninstall mode. Use with `--all` or `--trigger`. |
+| `--trigger ` | Target a specific trigger to uninstall. |
+| `--all` | Uninstall all agents created by this script. |
+| `--migrate-global`| Move older, "loose" agents into the global wrapper. |
+| `--dry-run` | Preview migration changes without modifying files. |
+| `--help` | Show the help message. |
 
 ## 🆘 Troubleshooting & FAQ
-- 📦 **Where did my backup go?** Every run creates `~/.zshrc.bak.<timestamp>` (or the detected RC file). Restore by copying it back.
-- 🧱 **Installer says Bash 4 required.** Install a newer Bash (e.g., `brew install bash`) and run the script with that binary: `bash codex_profile_installer.sh` or `/opt/homebrew/bin/bash codex_profile_installer.sh`.
-- 🔁 **Can I reuse profiles between machines?** Yes—commit your markdown files and run the installer on each machine with identical triggers.
-- ♻️ **How do I update an agent?** Rerun the installer with the same trigger and `--mode overwrite` (or choose overwrite interactively). A fresh block replaces the old one.
-- 🚫 **Why is my trigger missing in new shells?** Ensure you sourced the RC file or opened a new terminal. Check `codex-generic-status` for active functions.
-- ✂️ **What if my profile includes the delimiter string?** Change the delimiter by setting `ENDMARK` (interactive prompt or env var) and update your profile accordingly.
-- 🚪 **How do I disable file opening?** Set `FILE_OPENER=none` during install—the generated functions respect `CODEX_FILE_OPENER` overrides per session.
 
+- **`./codex_profile_installer.sh: command not found`**
+  - You forgot to make the script executable. Run `chmod +x codex_profile_installer.sh`.
+
+- **`mdexpert: command not found` after install**
+  - You need to reload your shell. Run `source ~/.zshrc` or `source ~/.bashrc`.
+
+- **`codex: command not found` when running my agent**
+  - The Codex CLI itself is not in your shell's `PATH`. Check your Codex CLI installation.
+
+- **How do I update an agent's profile?**
+  - Just re-run the installation command with the same `TRIGGER` and `--mode overwrite`. It will safely replace the old block with the new one.
+
+- **Where is the backup file?**
+  - A backup is created in the same directory as your RC file (e.g., `~/.zshrc.bak.20250919103200`).
 
