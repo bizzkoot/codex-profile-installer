@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Codex CLI Generic Agent Installer v0.0.1 (alpha)
+# Codex CLI Generic Agent Installer v0.0.2
 # Author: ChatGPT
 # License: MIT
 #
@@ -13,7 +13,40 @@
 #
 set -euo pipefail
 
-VERSION="0.0.1"
+# Robustly manage and clean up temporary files
+TMP_FILES=()
+cleanup() {
+  rm -f "${TMP_FILES[@]}"
+}
+trap cleanup EXIT
+
+# A wrapper around mktemp that registers the file for cleanup
+mktemp_safe() {
+  local tmp_file
+  tmp_file="$(mktemp)"
+  TMP_FILES+=("$tmp_file")
+  echo "$tmp_file"
+}
+
+_SED_INPLACE_STYLE=""
+
+sed_inplace(){
+  if [[ -z "${_SED_INPLACE_STYLE:-}" ]]; then
+    if sed --version >/dev/null 2>&1; then
+      _SED_INPLACE_STYLE="gnu"
+    else
+      _SED_INPLACE_STYLE="bsd"
+    fi
+  fi
+
+  if [[ "$_SED_INPLACE_STYLE" == "bsd" ]]; then
+    sed -i '' "$@"
+  else
+    sed -i "$@"
+  fi
+}
+
+VERSION="0.0.2"
 USER_TASK_DELIM="========================= USER TASK ========================="
 GLOBAL_BEGIN="# BEGIN GENERIC CODEX AGENTS v${VERSION}"
 GLOBAL_END="# END GENERIC CODEX AGENTS v${VERSION}"
@@ -32,7 +65,7 @@ require_bash(){
     exit 1
   fi
   if (( ${BASH_VERSINFO[0]} < 4 )); then
-    err "Bash >= 4.0 required. On macOS: brew install bash && /opt/homebrew/bin/bash $0"
+    err "Bash >= 4.0 required. On macOS, install bash via Homebrew (e.g., 'brew install bash') and rerun this script with the newly installed bash (for example: 'bash $0')."
     exit 1
   fi
 }
@@ -52,18 +85,39 @@ backup_rc(){
 
 safe_range_delete(){
   local file="$1" ; local start="$2" ; local end="$3"
-  local tmp="${file}.tmp.$$"
-  if sed "/${start}/,/${end}/d" "$file" > "$tmp"; then
+
+  if ! grep -qE "$start" "$file"; then
+    warn "Start marker '${start}' not found in ${file}; nothing to remove."
+    return 0
+  fi
+  if ! grep -qE "$end" "$file"; then
+    err "End marker '${end}' missing in ${file}; aborting removal to protect the file."
+    return 3
+  fi
+
+  local tmp; tmp="$(mktemp_safe)"
+  if awk -v s="$start" -v e="$end" '
+    $0 ~ s && !in_block { in_block=1; next }
+    $0 ~ e && in_block { in_block=0; next }
+    !in_block { print }
+    END {
+      if (in_block) exit 3
+    }
+  ' "$file" > "$tmp"; then
     mv "$tmp" "$file"
   else
-    rm -f "$tmp"; return 1
+    local status=$?
+    if (( status == 3 )); then
+      err "Matched start marker '${start}' but never found '${end}' while editing ${file}; leaving file untouched."
+    fi
+    return "$status"
   fi
 }
 
 insert_before_end(){
   # Insert contents of $2 before GLOBAL_END in $1
   local rc="$1" ; local block_file="$2"
-  local tmp="${rc}.tmp.$$"
+  local tmp; tmp="$(mktemp_safe)"
   awk -v endpat="${GLOBAL_END}" -v block_file="$block_file" '
     $0 ~ endpat {
       while ((getline line < block_file) > 0) {
@@ -95,6 +149,64 @@ ensure_global_block(){
 }
 
 escape_sed_pat(){ echo "$1" | sed 's/[.[\*^$]/\\&/g; s/)/\\)/g; s/(/\\(/g; s/{/\\{/g; s/}/\\}/g; s/|/\\|/g; s/\//\\\//g'; }
+
+detect_awk(){
+  if command -v gawk >/dev/null 2>&1; then
+    echo "gawk"
+    return 0
+  fi
+  # Check if the system awk supports the 3-argument match()
+  if echo "" | awk 'BEGIN{match("a", "b", c)}' >/dev/null 2>&1; then
+    echo "awk"
+    return 0
+  fi
+  err "GNU Awk (gawk) not found and system awk is not compatible."
+  warn "Please install gawk to use the migration feature (e.g., 'brew install gawk')."
+  exit 1
+}
+
+# ───────────────────────────── Version Check ─────────────────────────────
+check_for_version_mismatch(){
+  local rc="$1"
+  # This check is not needed if we are already running the migration.
+  if [[ ${MODE_MIGRATE:-0} -eq 1 ]]; then
+    return 0
+  fi
+  # Don't run if rc file doesn't exist
+  [[ -f "$rc" ]] || return 0
+
+  local found_version
+  found_version=$(grep -o -m 1 '# BEGIN GENERIC CODEX AGENTS v[0-9.]*' "$rc" | grep -o 'v[0-9.]*' | tr -d 'v' || true)
+
+  if [[ -n "$found_version" && "$found_version" != "$VERSION" ]]; then
+    err "Version Mismatch Detected!"
+    line
+    warn "This script is version v${VERSION}, but your existing installation is v${found_version}."
+    warn "Running install/uninstall with a mismatched version can corrupt your shell configuration."
+    line
+    info "To upgrade your installation to v${VERSION}, please run the migration command:"
+    printf "\n  bash %s --migrate-global --include-any-version\n\n" "$0"
+
+    if [[ ${INTERACTIVE:-1} -eq 0 ]]; then
+      if [[ "${AUTO_FORCE_MISMATCH:-0}" != "1" ]]; then
+        err "Auto mode aborting due to version mismatch."
+        warn "Set AUTO_FORCE_MISMATCH=1 to override this safety check."
+        exit 3
+      fi
+      warn "AUTO_FORCE_MISMATCH=1 detected; continuing despite mismatch."
+      return 0
+    fi
+
+    local q
+    q="$(ask_yes_no "Do you want to abort and run the migration instead?" "Y")"
+    if [[ "$q" == "Y" ]]; then
+      info "Aborting. Please run the migration command shown above."
+      exit 0
+    else
+      warn "Continuing at your own risk. This may lead to unexpected behavior."
+    fi
+  fi
+}
 
 # ───────────────────────────── Inputs / Flags ─────────────────────────────
 INTERACTIVE=1
@@ -213,7 +325,27 @@ select_tiers(){
       c="${c:-2}"
       # map digits to names
       if [[ -z "${c//[0-9, ]/}" ]]; then
-        c="$(echo "$c" | sed -E 's/1/low/g; s/2/mid/g; s/3/high/g; s/4/low,mid,high/g')"
+        local mapped=()
+        local invalid=0
+        local oifs="$IFS"
+        IFS=','
+        for num in $c; do
+          num="${num//[[:space:]]/}"
+          [[ -z "$num" ]] && continue
+          case "$num" in
+            1) mapped+=("low") ;;
+            2) mapped+=("mid") ;;
+            3) mapped+=("high") ;;
+            4) mapped+=("low" "mid" "high") ;;
+            *) invalid=1; break ;;
+          esac
+        done
+        IFS="$oifs"
+        if (( invalid == 0 )); then
+          c="$(IFS=','; echo "${mapped[*]}")"
+        else
+          c=""
+        fi
       fi
       # normalize CSV
       c="$(echo "$c" | tr '[:upper:]' '[:lower:]' | sed 's/ //g')"
@@ -236,7 +368,28 @@ select_tiers(){
       read -r -p "Your choice [default: 3]: " c || true
       c="${c:-3}"
       if [[ -z "${c//[0-9, ]/}" ]]; then
-        c="$(echo "$c" | sed -E 's/1/min/g; s/2/low/g; s/3/mid/g; s/4/high/g; s/5/min,low,mid,high/g')"
+        local mapped=()
+        local invalid=0
+        local oifs="$IFS"
+        IFS=','
+        for num in $c; do
+          num="${num//[[:space:]]/}"
+          [[ -z "$num" ]] && continue
+          case "$num" in
+            1) mapped+=("min") ;;
+            2) mapped+=("low") ;;
+            3) mapped+=("mid") ;;
+            4) mapped+=("high") ;;
+            5) mapped+=("min" "low" "mid" "high") ;;
+            *) invalid=1; break ;;
+          esac
+        done
+        IFS="$oifs"
+        if (( invalid == 0 )); then
+          c="$(IFS=','; echo "${mapped[*]}")"
+        else
+          c=""
+        fi
       fi
       c="$(echo "$c" | tr '[:upper:]' '[:lower:]' | sed 's/ //g')"
       IFS=',' read -r -a arr <<< "$c"
@@ -309,26 +462,64 @@ read_profile_text(){
     [[ -f "$path" ]] || { err "PROFILE_FILE not found: $path"; exit 1; }
     cat "$path"; return 0
   fi
+
+  local clipboard_cmd=()
+  if command -v pbpaste >/dev/null 2>&1; then
+    clipboard_cmd=(pbpaste)
+  elif command -v wl-paste >/dev/null 2>&1; then
+    clipboard_cmd=(wl-paste)
+  elif command -v xclip >/dev/null 2>&1; then
+    clipboard_cmd=(xclip -o)
+  fi
+
   stderr
   stderr "Paste your profile/behavior markdown."
-  stderr "Finish with a line containing only: ${endmark}"
+  stderr "Press Ctrl-D on an empty line to finish, or type '${endmark}' if preferred."
+  if (( ${#clipboard_cmd[@]} > 0 )); then
+    local use_clipboard="" clip_data=""
+    read -r -p "Use current clipboard contents? [Y/n]: " use_clipboard || true
+    use_clipboard="${use_clipboard:-Y}"
+    case "${use_clipboard^^}" in
+      Y|YES)
+        clip_data="$( "${clipboard_cmd[@]}" 2>/dev/null || true )"
+        if [[ -n "${clip_data//[[:space:]]/}" ]]; then
+          printf "%s" "$clip_data"
+          return 0
+        else
+          warn "Clipboard was empty or whitespace-only; falling back to manual paste."
+        fi
+        ;;
+    esac
+  fi
+
   local buf="" line tries=0
   while true; do
     buf=""
+    local saw_endmark=0
     while IFS= read -r line; do
-      [[ "$line" == "$endmark" ]] && break
+      if [[ "$line" == "$endmark" ]]; then
+        saw_endmark=1
+        break
+      fi
       buf+="$line"$'\n'
-    done
-    if [[ -n "$buf" ]]; then
+    done || true
+    if [[ -n "${buf//[[:space:]]/}" ]]; then
       printf "%s" "$buf"
       return 0
+    fi
+    if (( saw_endmark == 1 )); then
+      warn "No profile text detected before '${endmark}'. Please try again."
+    elif [[ -z "$buf" ]]; then
+      warn "No profile text detected. Please try again."
+    else
+      warn "Profile text contained only whitespace. Please try again."
     fi
     tries=$((tries+1))
     if (( tries >= 3 )); then
       err "Profile text was empty after 3 attempts."
       exit 1
     fi
-    warn "Empty profile text. Please paste again (attempt ${tries}/3)."
+    warn "Paste again or press Ctrl-D when done (attempt ${tries}/3)."
   done
 }
 
@@ -377,7 +568,7 @@ emit_agent_block(){
   [[ "$ws_exec" == "1" ]] && ws_execution_default="true"
   if [[ "$type" == "Planning" ]]; then sandbox="read-only"; ask="untrusted"; else sandbox="workspace-write"; ask="on-request"; fi
 
-  local tmp_block; tmp_block="$(mktemp)"
+  local tmp_block; tmp_block="$(mktemp_safe)"
   {
 cat <<EOF
 # BEGIN GENERIC CODEX AGENT (${trigger}) v${VERSION}
@@ -473,7 +664,12 @@ uninstall_all(){
     safe_range_delete "$rc" "$(escape_sed_pat "$GLOBAL_BEGIN")" "$(escape_sed_pat "$GLOBAL_END")" || true
   fi
   # remove any stray per-trigger blocks
-  sed -i'' '/# BEGIN GENERIC CODEX AGENT (/,/# END GENERIC CODEX AGENT (/d' "$rc" || true
+  local tmp_rc; tmp_rc="$(mktemp_safe)"
+  if sed '/# BEGIN GENERIC CODEX AGENT (/,/# END GENERIC CODEX AGENT (/d' "$rc" > "$tmp_rc"; then
+    mv "$tmp_rc" "$rc"
+  else
+    return 1
+  fi || true
   ok "Removed all generic codex agents from ${rc}"
 }
 
@@ -489,9 +685,193 @@ uninstall_trigger(){
 }
 
 # ───────────────────────────── Migration logic ─────────────────────────────
+
+bump_all_versions_in_rc(){
+  local rc="$1"
+  local VERSION_RE="v[0-9][0-9.]*"
+
+  # Update GLOBAL wrapper versions to the current script VERSION
+  # BEGIN / END lines
+  if [[ -f "$rc" ]]; then
+    # Use portable sed helper for in-place updates
+    sed_inplace -e "s/# BEGIN GENERIC CODEX AGENTS ${VERSION_RE}/# BEGIN GENERIC CODEX AGENTS v${VERSION}/g" "$rc" 2>/dev/null || true
+    sed_inplace -e "s/# END GENERIC CODEX AGENTS ${VERSION_RE}/# END GENERIC CODEX AGENTS v${VERSION}/g"   "$rc" 2>/dev/null || true
+    # Per-trigger BEGIN lines
+    # Use perl for robust regex group replacement
+    perl -pi -e "s/(# BEGIN GENERIC CODEX AGENT \\([^)]+\\) )${VERSION_RE}/\\1v${VERSION}/" "$rc" 2>/dev/null || true
+  fi
+}
+
+detect_mixed_versions_and_offer_full_uninstall(){
+  local rc="$1"
+  [[ ! -f "$rc" ]] && return 0
+
+  # Collect distinct versions in GLOBAL wrappers
+  local versions
+  versions=$(grep -E '^[[:space:]]*# BEGIN GENERIC CODEX AGENTS v[0-9.]+' "$rc" | sed -E 's/.* (v[0-9.]+)$/\1/' | sort -u || true)
+
+  # Count how many distinct versions we found
+  local count
+  count=$(printf "%s\n" "$versions" | grep -c . || true)
+
+  if [[ "$count" -gt 1 ]]; then
+    echo "⚠️  Detected multiple GENERIC CODEX AGENTS versions in $rc:"
+    printf '   • %s\n' $versions
+    echo "This can lead to confusing state. You can:"
+    echo "  1) Full uninstall (remove ALL generic agent blocks), then reinstall cleanly"
+    echo "  2) Skip (not recommended)"
+    read -r -p "Proceed with FULL UNINSTALL now? [y/N]: " ans
+    case "${ans:-N}" in
+      y|Y)
+        purge_all_generic_blocks "$rc" || {
+          echo "❌ Failed to purge generic blocks from $rc"
+          return 1
+        }
+        echo "✅ Removed all GENERIC CODEX AGENTS blocks from $rc."
+        echo "   Open a new shell or run: source \"$rc\""
+        return 2  # signal: we already handled cleanup; caller should stop further actions
+        ;;
+      *)
+        echo "👉 Skipping full uninstall."
+        ;;
+    esac
+  fi
+  return 0
+}
+
+purge_all_generic_blocks(){
+  local rc="$1"
+  [[ ! -f "$rc" ]] && return 0
+  local tmp
+  tmp="$(mktemp_safe)"
+  # Remove ANY ranges between BEGIN/END GENERIC CODEX AGENTS (any version)
+  awk '
+    BEGIN{skip=0}
+    /^[[:space:]]*# BEGIN GENERIC CODEX AGENTS v[0-9.]+[[:space:]]*$/ {skip=1; next}
+    /^[[:space:]]*# END GENERIC CODEX AGENTS v[0-9.]+[[:space:]]*$/   {skip=0; next}
+    skip==0 {print}
+  ' "$rc" > "$tmp"
+  mv "$tmp" "$rc"
+}
+
+has_generic_blocks(){
+  local rc="$1"
+  [[ ! -f "$rc" ]] && return 1
+  grep -qE '^[[:space:]]*# BEGIN GENERIC CODEX AGENTS v[0-9.]+' "$rc"
+}
+
+interactive_first_install(){
+  local rc="$1"
+  echo "ℹ️  No existing GENERIC agents found in $rc."
+  echo "🧙  Launching interactive first-time installer..."
+  echo
+
+  # Prompt basics
+  local trigger type model tiers opener ws
+  read -r -p "Trigger name [mdexpert]: " trigger; trigger="${trigger:-mdexpert}"
+  read -r -p "Agent type (Planning/Execution) [Execution]: " type; type="${type:-Execution}"
+  read -r -p "Model [gpt-5-codex]: " model; model="${model:-gpt-5-codex}"
+  read -r -p "Tiers (comma-separated) [mid]: " tiers; tiers="${tiers:-mid}"
+  read -r -p "Default file opener [vscode-insiders]: " opener; opener="${opener:-vscode-insiders}"
+  read -r -p "Enable web search? (true/false) [true]: " ws; ws="${ws:-true}"
+
+  # Prepare wrapper if not present
+  if ! grep -qE '^[[:space:]]*# BEGIN GENERIC CODEX AGENTS v[0-9.]+' "$rc"; then
+    {
+      echo "# BEGIN GENERIC CODEX AGENTS v${VERSION}"
+      echo "# (Agents installed by codex_profile_installer v${VERSION} will appear below)"
+    } >> "$rc"
+  fi
+
+  # Compose profile payload (minimal – user can edit later)
+  local now; now="$(date)"
+  {
+    echo "# BEGIN GENERIC CODEX AGENT (${trigger}) v${VERSION}"
+    echo "# Generated: ${now}"
+    echo "# Trigger: ${trigger}"
+    echo "# Type: ${type}"
+    echo "# Model: ${model}"
+    echo "# Tiers: ${tiers}"
+    echo "# Default opener: ${opener}"
+    echo "# Web Search: Planning=ON, Execution=${ws}"
+    echo "# Delimiter: ========================= USER TASK ========================="
+    echo
+    echo "# default alias -> chosen default tier"
+    echo "${trigger}() { ${trigger}-$(echo \"$tiers\" | awk -F, '{print $1}') \"\$@\"; }"
+    echo
+    echo "# track installed agents (space-separated list of triggers)"
+    echo "export CODEX_GENERIC_AGENTS=\"\${CODEX_GENERIC_AGENTS:-} ${trigger}\""
+    echo
+    echo "# helper prints only the generic agents installed by this script"
+    echo "if ! type codex-generic-status >/dev/null 2>&1; then"
+    echo "codex-generic-status() {"
+    echo "  echo \"📂 Installed Codex agents (generic):\""
+    echo "  for a in \$CODEX_GENERIC_AGENTS; do"
+    echo "    [[ -z \"\$a\" ]] && continue"
+    echo "    if type \"\$a\" >/dev/null 2>&1; then"
+    echo "      echo \" • \$a (active in this shell)\""
+    echo "    else"
+    echo "      echo \" • \$a (inactive here — run 'source <your shell rc>')\""
+    echo "    fi"
+    echo "  done"
+    echo "}"
+    echo "fi"
+    echo
+    echo "# fall back to generic helper when codex-status is unused elsewhere"
+    echo "if ! type codex-status >/dev/null 2>&1; then"
+    echo "codex-status(){ codex-generic-status; }"
+    echo "fi"
+    echo
+    echo "__PROFILE__=\$("
+    echo "cat <<'__CODEX_PROFILE__'"
+    echo "# ${trigger} profile (starter)"
+    echo
+    echo "You can customize this embedded profile text later inside your rc."
+    echo "__CODEX_PROFILE__"
+    echo ")"
+    echo
+    echo "${trigger}-$(echo \"$tiers\" | awk -F, '{print $1}')() {"
+    echo "    if command -v codex >/dev/null 2>&1; then"
+    echo "        local __FO=\"\${CODEX_FILE_OPENER:-${opener}}\""
+    echo "        local __WS=\"${ws}\""
+    echo "        local __PROMPT=\"\${__PROFILE__}"
+    echo
+    echo "========================= USER TASK ========================="
+    echo
+    echo "USER TASK: \$@\""
+    echo "        codex \\"
+    echo "            --sandbox $( [[ \"$type\" == \"Planning\" ]] && echo 'read-only' || echo 'workspace-write' ) \\"
+    echo "            --ask-for-approval $( [[ \"$type\" == \"Planning\" ]] && echo 'untrusted' || echo 'on-request' ) \\"
+    echo "            --model \"${model}\" \\"
+    echo "            --config model_reasoning_effort=medium \\"
+    echo "            --config model_verbosity=medium \\"
+    echo "            --config \"file_opener=\${__FO}\" \\"
+    echo "            --config \"tools.web_search=\${__WS}\" \\"
+    echo "            \"\${__PROMPT}\" || return \$?"
+    echo "    else"
+    echo "        echo \"❌ Codex CLI not available\"; return 127"
+    echo "    fi"
+    echo "}"
+    echo "# END GENERIC CODEX AGENT (${trigger})"
+  } >> "$rc"
+
+  # Ensure we close the GLOBAL wrapper once
+  if ! grep -qE '^[[:space:]]*# END GENERIC CODEX AGENTS v[0-9.]+' "$rc"; then
+    echo "# END GENERIC CODEX AGENTS v${VERSION}" >> "$rc"
+  fi
+
+  echo
+  echo "✅ Installed '${trigger}' under GENERIC v${VERSION}."
+  echo "   Reload with: source \"$rc\""
+}
+
 migrate_global(){
-  local rc="$1" ; local rc_tmp="${rc}.work.$$"
+  local rc="$1" ; local rc_tmp; rc_tmp="$(mktemp_safe)"
+  detect_mixed_versions_and_offer_full_uninstall "$rc"; case $? in 2) return 0;; esac
+  if [[ ${INCLUDE_ANY_VERSION:-0} -eq 1 ]]; then bump_all_versions_in_rc "$rc"; fi
   [[ -f "$rc" ]] || { warn "No rc file found at ${rc}"; return 0; }
+
+  local awk_cmd; awk_cmd="$(detect_awk)"
 
   ensure_global_block "$rc"
 
@@ -514,18 +894,20 @@ migrate_global(){
     filter_pat="("$(echo "$csv" | sed 's/,/|/g')")"
   fi
 
-  local list_file blocks_file sed_script
-  list_file="$(mktemp)"
-  blocks_file="$(mktemp)"
-  sed_script="$(mktemp)"
+  local begin_pat end_pat_prefix list_file blocks_file sed_script
+  begin_pat="^# BEGIN GENERIC CODEX AGENT [(]([^)]+)[)] ${version_regex}"
+  end_pat_prefix="^# END GENERIC CODEX AGENT [(]"
+  list_file="$(mktemp_safe)"
+  blocks_file="$(mktemp_safe)"
+  sed_script="$(mktemp_safe)"
 
-  awk -v gb="$gb" -v ge="$ge" -v ver="$version_regex" -v filt="$filter_pat" '
+  "$awk_cmd" -v gb="$gb" -v ge="$ge" -v pat_begin="$begin_pat" -v pat_end_prefix="$end_pat_prefix" -v filt="$filter_pat" '
     BEGIN{ in_block=0; start=0; trig=""; }
     {
       line=$0
-      if (match(line, "^# BEGIN GENERIC CODEX AGENT \\(([^)]+)\\) " ver, m)) {
+      if (match(line, pat_begin, m)) {
         in_block=1; start=NR; trig=m[1];
-      } else if (in_block && match(line, "^# END GENERIC CODEX AGENT \\(" trig "\\)")) {
+      } else if (in_block && match(line, pat_end_prefix trig "\\)")) {
         end=NR;
         if (!(start>gb && end<ge)) {
           if (filt=="" || trig ~ filt) {
@@ -539,7 +921,6 @@ migrate_global(){
 
   if [[ ! -s "$list_file" ]]; then
     ok "No per-trigger blocks found outside GLOBAL to migrate."
-    rm -f "$list_file" "$blocks_file" "$sed_script"
     return 0
   fi
 
@@ -548,7 +929,6 @@ migrate_global(){
 
   if [[ $DRY_RUN -eq 1 ]]; then
     warn "Dry-run: not modifying ${rc}"
-    rm -f "$list_file" "$blocks_file" "$sed_script"
     return 0
   fi
 
@@ -562,14 +942,12 @@ migrate_global(){
   if sed -f "$sed_script" "$rc" > "$rc_tmp"; then
     mv "$rc_tmp" "$rc"
   else
-    rm -f "$rc_tmp" "$list_file" "$blocks_file" "$sed_script"
     err "Failed during deletion phase."
     return 1
   fi
 
   insert_before_end "$rc" "$blocks_file"
   ok "Migrated $(wc -l < "$list_file" | xargs) block(s) into GLOBAL wrapper."
-  rm -f "$list_file" "$blocks_file" "$sed_script"
 }
 
 # ───────────────────────────── Post-install helper ─────────────────────────────
@@ -609,6 +987,43 @@ offer_source_now(){
 }
 
 # ───────────────────────────── Main (install / uninstall / migrate) ─────────────────────────────
+
+_install_agent(){
+  local trigger="$1" type="$2" model="$3" opener="$4" ws_exec="$5" profile_text="$6" tiers_csv="$7" group_global="$8" install_mode="$9"
+
+  [[ -n "$profile_text" ]] || { err "Empty profile/behavior text"; return 1; }
+
+  local rc ; rc="$(detect_rc)"
+  [[ -f "$rc" ]] || touch "$rc"
+
+  # If the mode is 'skip' and the agent exists, do nothing.
+  if [[ "${install_mode:-overwrite}" =~ ^(s|S|skip|SKIP)$ ]] && grep -q "# BEGIN GENERIC CODEX AGENT (${trigger})" "$rc" 2>/dev/null; then
+    warn "Keeping existing agent '${trigger}'. No changes."
+    offer_source_now "$rc" "$trigger"
+    return 0
+  fi
+
+  # If we proceed, we are definitely installing. Backup once.
+  backup_rc "$rc"
+
+  # If it exists, remove it. We already handled the 'skip' case.
+  if grep -q "# BEGIN GENERIC CODEX AGENT (${trigger})" "$rc" 2>/dev/null; then
+      safe_range_delete "$rc" "# BEGIN GENERIC CODEX AGENT (${trigger})" "# END GENERIC CODEX AGENT (${trigger})" || {
+        err "Failed to remove existing block for '${trigger}'"; return 1; }
+  fi
+
+  local block_file ; block_file="$(emit_agent_block "$trigger" "$type" "$model" "$opener" "$ws_exec" "$profile_text" "$tiers_csv")"
+
+  if [[ "${group_global^^}" == "Y" ]]; then
+    ensure_global_block "$rc"
+    insert_before_end "$rc" "$block_file"
+  else
+    cat "$block_file" >> "$rc"
+  fi
+  ok "Installed agent '${trigger}' into ${rc}"
+  offer_source_now "$rc" "$trigger"
+}
+
 install_interactive(){
   local default_file_opener
   default_file_opener="${CODEX_FILE_OPENER:-$FILE_OPENER}"
@@ -640,44 +1055,23 @@ install_interactive(){
   mapfile -t VALID_TIERS < <(validate_tiers "$MODEL" "$TIERS") || true
   [[ ${#VALID_TIERS[@]} -gt 0 ]] || VALID_TIERS=("mid")
 
-  local rc ; rc="$(detect_rc)"
-  [[ -f "$rc" ]] || touch "$rc"
-  backup_rc "$rc"
-
-  # Overwrite/Skip/Delete handling for same trigger
-  if grep -q "# BEGIN GENERIC CODEX AGENT (${TRIGGER})" "$rc" 2>/dev/null; then
+  local install_mode="overwrite"
+  local rc_path_for_check ; rc_path_for_check="$(detect_rc)"
+  if grep -q "# BEGIN GENERIC CODEX AGENT (${TRIGGER})" "$rc_path_for_check" 2>/dev/null; then
     local mode
     stderr
-    stderr "An agent named '${TRIGGER}' already exists in ${rc}."
+    stderr "An agent named '${TRIGGER}' already exists in ${rc_path_for_check}."
     stderr "  [O]verwrite  - Replace the existing block (default)"
     stderr "  [S]kip       - Leave it untouched"
-    stderr "  [D]elete+Add - Remove then install fresh"
-    read -r -p "Choose [O/S/D, default O]: " mode || true
+    read -r -p "Choose [O/S, default O]: " mode || true
     case "${mode:-O}" in
-      S|s|skip|SKIP) warn "Keeping existing agent '${TRIGGER}'. No changes."; offer_source_now "$rc" "$TRIGGER"; return 0 ;;
-      D|d|delete|DELETE|O|o|overwrite|OVERWRITE)
-        safe_range_delete "$rc" "# BEGIN GENERIC CODEX AGENT (${TRIGGER})" "# END GENERIC CODEX AGENT (${TRIGGER})" || {
-          err "Failed to remove existing block for '${TRIGGER}'"; exit 1; }
-      ;;
-      *) ;;
+      S|s|skip|SKIP) install_mode="skip" ;;
+      *) install_mode="overwrite" ;;
     esac
   fi
 
-  # Build agent block
   local tiers_joined="$(IFS=','; echo "${VALID_TIERS[*]}")"
-  local block_file ; block_file="$(emit_agent_block "$TRIGGER" "$TYPE" "$MODEL" "$FILE_OPENER" "$WS_EXEC" "$PROFILE_TEXT" "$tiers_joined")"
-
-  # Write either under GLOBAL wrapper or appended to rc
-  if [[ "${GROUP_GLOBAL^^}" == "Y" ]]; then
-    ensure_global_block "$rc"
-    insert_before_end "$rc" "$block_file"
-  else
-    cat "$block_file" >> "$rc"
-  fi
-
-  rm -f "$block_file"
-  ok "Installed agent '${TRIGGER}' into ${rc}"
-  offer_source_now "$rc" "$TRIGGER"
+  _install_agent "$TRIGGER" "$TYPE" "$MODEL" "$FILE_OPENER" "$WS_EXEC" "$PROFILE_TEXT" "$tiers_joined" "$GROUP_GLOBAL" "$install_mode"
 }
 
 install_auto(){
@@ -700,32 +1094,8 @@ install_auto(){
   [[ ${#VALID_TIERS[@]} -gt 0 ]] || VALID_TIERS=("mid")
   [[ -n "$PROFILE_TEXT" ]] || { err "Empty profile/behavior text"; exit 1; }
 
-  local rc ; rc="$(detect_rc)"
-  [[ -f "$rc" ]] || touch "$rc"
-  backup_rc "$rc"
-
-  # Mode for existing trigger
-  case "${INSTALL_MODE:-overwrite}" in
-    skip|SKIP|s|S) if grep -q "# BEGIN GENERIC CODEX AGENT (${TRIGGER})" "$rc" 2>/dev/null; then warn "Keeping existing agent '${TRIGGER}'"; offer_source_now "$rc" "$TRIGGER"; return 0; fi ;;
-    delete|DELETE|d|D|overwrite|OVERWRITE|o|O)
-      if grep -q "# BEGIN GENERIC CODEX AGENT (${TRIGGER})" "$rc" 2>/dev/null; then
-        safe_range_delete "$rc" "# BEGIN GENERIC CODEX AGENT (${TRIGGER})" "# END GENERIC CODEX AGENT (${TRIGGER})" || true
-      fi ;;
-    *) ;;
-  esac
-
   local tiers_joined="$(IFS=','; echo "${VALID_TIERS[*]}")"
-  local block_file ; block_file="$(emit_agent_block "$TRIGGER" "$TYPE" "$MODEL" "$FILE_OPENER" "$WS_EXEC" "$PROFILE_TEXT" "$tiers_joined")"
-
-  if [[ "${GROUP_GLOBAL^^}" == "Y" ]]; then
-    ensure_global_block "$rc"
-    insert_before_end "$rc" "$block_file"
-  else
-    cat "$block_file" >> "$rc"
-  fi
-  rm -f "$block_file"
-  ok "Installed agent '${TRIGGER}' into ${rc}"
-  offer_source_now "$rc" "$TRIGGER"
+  _install_agent "$TRIGGER" "$TYPE" "$MODEL" "$FILE_OPENER" "$WS_EXEC" "$PROFILE_TEXT" "$tiers_joined" "$GROUP_GLOBAL" "${INSTALL_MODE:-overwrite}"
 }
 
 main_uninstall(){
@@ -756,10 +1126,26 @@ main_migrate(){
   migrate_global "$rc"
 }
 
+FORCE_FIRST_INSTALL=0
+
 main(){
+  for arg in "$@"; do
+    case "$arg" in
+      --force-first-install)
+        FORCE_FIRST_INSTALL=1
+        ;;
+    esac
+  done
+
+
   line
   stderr "Codex CLI Generic Agent Installer v${VERSION} (alpha)"
   line
+
+  # Detect rc file early for version check, then proceed with main logic.
+  local rc; rc="$(detect_rc)"
+  check_for_version_mismatch "$rc"
+  detect_mixed_versions_and_offer_full_uninstall "$rc"; case $? in 2) return 0;; esac
 
   if [[ $MODE_UNINSTALL -eq 1 ]]; then
     main_uninstall

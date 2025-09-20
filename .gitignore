@@ -13,3 +13,6 @@ dist/
 .idea/
 *.swp
 *~
+
+Archive
+.env
